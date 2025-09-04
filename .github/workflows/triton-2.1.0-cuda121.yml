@@ -14,7 +14,7 @@ jobs:
       matrix:
         python_version: ['3.12']
         arch: ['x86_64']
-        cuda_version: ['12.1']  # 切换为CUDA 12.1
+        cuda_version: ['12.1']
 
     steps:
       - name: Clean workspace
@@ -30,34 +30,34 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # 安装CUDA 12.1（替换为12.1版本）
+      # 安装CUDA 12.1
       - name: Install CUDA ${{ matrix.cuda_version }}
         uses: Jimver/cuda-toolkit@v0.2.14
         with:
           cuda: ${{ matrix.cuda_version }}
           method: network
-          subpackages: 'nvcc,cudart-dev'  # 安装nvcc和开发库
+          subpackages: 'nvcc,cudart-dev,curand-dev,cublas-dev,cufft-dev'
 
       # 配置Python 3.12
       - name: Setup Python ${{ matrix.python_version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python_version }}
+          python_version: ${{ matrix.python_version }}
           architecture: ${{ matrix.arch }}
           cache: 'pip'
 
-      # 安装依赖（适配CUDA 12.1）
+      # 安装依赖
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          
-          # 依赖版本适配CUDA 12.1
           python -m pip install cibuildwheel==2.16.2
-          python -m pip install numpy==1.25.2 pybind11==2.11.1 scikit-build==0.17.6
-          
-          # 安装LLVM 15（CUDA 12.1兼容LLVM 15）
+          python -m pip install numpy==1.25.2 pybind11==2.11.1 scikit-build==0.17.6 cmake==3.26.4
+          # 安装LLVM 15.0.7
           choco install -y llvm --version=15.0.7 --no-progress
           echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # 验证安装
+          python --version
+          pip --version
 
       # 关键补丁：适配CUDA 12.1的兼容性修复
       - name: Patch Triton 2.1.0 for CUDA 12.1
@@ -66,31 +66,38 @@ jobs:
           Add-Content -Path "python/setup.cfg" -Value "`n[build_ext]`nbase-dir=./"
           
           # 2. 修正LLVM配置路径
-          (Get-Content "python/setup.py") -replace "llvm-config", "C:\Program Files\LLVM\bin\llvm-config.exe" | Set-Content "python/setup.py"
+          (Get-Content "python/setup.py") -replace "llvm-config", "C:\\Program Files\\LLVM\\bin\\llvm-config.exe" | Set-Content "python/setup.py"
           
           # 3. CUDA 12.1兼容性补丁（修复nvcc编译选项）
           (Get-Content "python/triton/_C/CMakeLists.txt") -replace "-arch=sm_35", "-arch=sm_52" | Set-Content "python/triton/_C/CMakeLists.txt"
           
-          # 4. 替换CUDA 12.1中移除的API（cuMemGetInfo_v2 -> cuMemGetInfo）
+          # 4. 替换CUDA 12.1中移除的API
           (Get-Content "python/triton/_C/src/runtime/cuda/cuda_allocator.cc") -replace "cuMemGetInfo_v2", "cuMemGetInfo" | Set-Content "python/triton/_C/src/runtime/cuda/cuda_allocator.cc"
           
-          # 5. 禁用CUDA版本上限检查（允许12.1通过）
-          (Get-Content "python/triton/_C/CMakeLists.txt") -replace "if\(CUDA_VERSION VERSION_GREATER_EQUAL 12.0\)", "if(FALSE)" | Set-Content "python/triton/_C/CMakeLists.txt"
+          # 5. 修复CUDA版本检查逻辑
+          (Get-Content "python/triton/_C/CMakeLists.txt") -replace "if\(CUDA_VERSION VERSION_GREATER_EQUAL 12.0\)\n\s+message\(FATAL_ERROR \"CUDA 12\+ is not supported yet\"\)", "# CUDA 12.1 support enabled" | Set-Content "python/triton/_C/CMakeLists.txt"
+          
+          # 6. 修复Python 3.12兼容性（修复PyThreadState_Get()返回值检查）
+          (Get-Content "python/triton/_C/src/runtime/launcher.cc") -replace "PyThreadState_Get\(\) == NULL", "!PyGILState_Check\(\)" | Set-Content "python/triton/_C/src/runtime/launcher.cc"
 
-      # 构建Wheel包（适配CUDA 12.1参数）
+      # 构建Wheel包
       - name: Build Triton 2.1.0 (CUDA 12.1) Wheel
         env:
           CIBW_BUILD: "cp${{ matrix.python_version | replace('.', '') }}-win_${{ matrix.arch }}"
           CIBW_SKIP: "*-win32 *-manylinux* *-macosx*"
-          # 适配CUDA 12.1的编译参数
-          CIBW_ENVIRONMENT: "MAX_JOBS=2 TRITON_BUILD_WITH_MSVC=1 CUDA_PATH=$env:CUDA_PATH_V${{ matrix.cuda_version | replace('.', '') }} CUDA_ARCH_LIST=52;60;61;70;75;80;86"
+          CIBW_ENVIRONMENT: "MAX_JOBS=2 TRITON_BUILD_WITH_MSVC=1 CUDA_PATH=$env:CUDA_PATH_V${{ matrix.cuda_version | replace('.', '') }} CUDA_ARCH_LIST=52;60;61;70;75;80;86 CMAKE_GENERATOR=Ninja"
           CIBW_BEFORE_BUILD: "python -m pip install numpy==1.25.2"
           CIBW_WINDOWS_BUILD_ID: "vs2022"
         run: |
-          # 验证CUDA 12.1环境
+          # 安装Ninja构建工具
+          choco install -y ninja --no-progress
+          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          
+          # 验证环境
           echo "CUDA路径: $env:CUDA_PATH_V${{ matrix.cuda_version | replace('.', '') }}"
-          nvcc --version  # 应显示12.1.x
-          llvm-config --version  # 应显示15.0.7
+          nvcc --version
+          llvm-config --version
+          ninja --version
           
           # 执行构建
           python -m cibuildwheel --output-dir wheelhouse .
