@@ -1,111 +1,58 @@
-name: Build Triton 2.1.0 (CUDA 12.1) Windows Wheel
+name: Build Triton 2.1.0 for Windows (Python 3.12, CUDA 12.1)
 
 on:
-  workflow_dispatch:  # 手动触发构建
-
-permissions: read-all
+  workflow_dispatch:
+    inputs:
+      triton_version:
+        description: 'Triton version to build'
+        required: true
+        default: '2.1.0'
 
 jobs:
-  Build-Windows-Wheel:
-    timeout-minutes: 240
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        python_version: ['3.12']
-        arch: ['x86_64']
-        cuda_version: ['12.1']
-
+  build-windows-wheel:
+    runs-on: windows-latest
     steps:
-      - name: Clean workspace
-        run: |
-          Remove-Item -Path .\* -Recurse -Force -ErrorAction SilentlyContinue
-
-      # 检出Triton 2.1.0源码
-      - name: Checkout Triton 2.1.0
+      - name: Checkout Triton repository
         uses: actions/checkout@v4
         with:
-          repository: triton-lang/triton
+          repository: openai/triton
           ref: v2.1.0
           submodules: recursive
-          fetch-depth: 1
 
-      # 安装CUDA 12.1
-      - name: Install CUDA ${{ matrix.cuda_version }}
-        uses: Jimver/cuda-toolkit@v0.2.14
+      - name: Install CUDA 12.1
+        uses: Jimver/cuda-toolkit@v0.2.16
         with:
-          cuda: ${{ matrix.cuda_version }}
+          cuda: '12.1.0'
           method: network
-          subpackages: 'nvcc,cudart-dev,curand-dev,cublas-dev,cufft-dev'
+          sub-packages: '['nvcc', 'cudart', 'cublas', 'cufft', 'curand']'
 
-      # 配置Python 3.12
-      - name: Setup Python ${{ matrix.python_version }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python_version: ${{ matrix.python_version }}
-          architecture: ${{ matrix.arch }}
-          cache: 'pip'
+          python-version: '3.12'
+          architecture: 'x64'
 
-      # 安装依赖
-      - name: Install build dependencies
+      - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install cibuildwheel==2.16.2
-          python -m pip install numpy==1.25.2 pybind11==2.11.1 scikit-build==0.17.6 cmake==3.26.4
-          # 安装LLVM 15.0.7
-          choco install -y llvm --version=15.0.7 --no-progress
-          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          # 验证安装
-          python --version
-          pip --version
+          python -m pip install --upgrade pip
+          python -m pip install setuptools wheel ninja cmake
+          python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-      # 关键补丁：适配CUDA 12.1的兼容性修复
-      - name: Patch Triton 2.1.0 for CUDA 12.1
+      - name: Apply Triton patches for Python 3.12 compatibility
         run: |
-          # 1. 修复setup.cfg路径
-          Add-Content -Path "python/setup.cfg" -Value "`n[build_ext]`nbase-dir=./"
-          
-          # 2. 修正LLVM配置路径
-          (Get-Content "python/setup.py") -replace "llvm-config", "C:\\Program Files\\LLVM\\bin\\llvm-config.exe" | Set-Content "python/setup.py"
-          
-          # 3. CUDA 12.1兼容性补丁（修复nvcc编译选项）
-          (Get-Content "python/triton/_C/CMakeLists.txt") -replace "-arch=sm_35", "-arch=sm_52" | Set-Content "python/triton/_C/CMakeLists.txt"
-          
-          # 4. 替换CUDA 12.1中移除的API
-          (Get-Content "python/triton/_C/src/runtime/cuda/cuda_allocator.cc") -replace "cuMemGetInfo_v2", "cuMemGetInfo" | Set-Content "python/triton/_C/src/runtime/cuda/cuda_allocator.cc"
-          
-          # 5. 修复CUDA版本检查逻辑
-          (Get-Content "python/triton/_C/CMakeLists.txt") -replace "if\(CUDA_VERSION VERSION_GREATER_EQUAL 12.0\)\n\s+message\(FATAL_ERROR \"CUDA 12\+ is not supported yet\"\)", "# CUDA 12.1 support enabled" | Set-Content "python/triton/_C/CMakeLists.txt"
-          
-          # 6. 修复Python 3.12兼容性（修复PyThreadState_Get()返回值检查）
-          (Get-Content "python/triton/_C/src/runtime/launcher.cc") -replace "PyThreadState_Get\(\) == NULL", "!PyGILState_Check\(\)" | Set-Content "python/triton/_C/src/runtime/launcher.cc"
+          # Fix setup.py for Python 3.12 compatibility
+          (Get-Content -Path setup.py) -replace 'distutils.core', 'setuptools' | Set-Content -Path setup.py
+          # Fix CUDA version check
+          (Get-Content -Path csrc/triton/CMakeLists.txt) -replace '12.0', '12.1' | Set-Content -Path csrc/triton/CMakeLists.txt
 
-      # 构建Wheel包
-      - name: Build Triton 2.1.0 (CUDA 12.1) Wheel
-        env:
-          CIBW_BUILD: "cp${{ matrix.python_version | replace('.', '') }}-win_${{ matrix.arch }}"
-          CIBW_SKIP: "*-win32 *-manylinux* *-macosx*"
-          CIBW_ENVIRONMENT: "MAX_JOBS=2 TRITON_BUILD_WITH_MSVC=1 CUDA_PATH=$env:CUDA_PATH_V${{ matrix.cuda_version | replace('.', '') }} CUDA_ARCH_LIST=52;60;61;70;75;80;86 CMAKE_GENERATOR=Ninja"
-          CIBW_BEFORE_BUILD: "python -m pip install numpy==1.25.2"
-          CIBW_WINDOWS_BUILD_ID: "vs2022"
+      - name: Build Triton wheel
         run: |
-          # 安装Ninja构建工具
-          choco install -y ninja --no-progress
-          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          
-          # 验证环境
-          echo "CUDA路径: $env:CUDA_PATH_V${{ matrix.cuda_version | replace('.', '') }}"
-          nvcc --version
-          llvm-config --version
-          ninja --version
-          
-          # 执行构建
-          python -m cibuildwheel --output-dir wheelhouse .
+          $env:CUDA_HOME = "${{ env.CUDA_PATH }}"
+          $env:PATH = "${{ env.CUDA_PATH }}\bin;$env:PATH"
+          python setup.py bdist_wheel --cmake-flags="-DCUDA_ARCH_LIST=7.0;7.5;8.0;8.6" --cuda-path="${{ env.CUDA_PATH }}"
 
-      # 上传构建产物
-      - name: Upload Triton 2.1.0 (CUDA 12.1) Wheel
+      - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: triton-2.1.0-cuda121-cp${{ matrix.python_version | replace('.', '') }}-win_${{ matrix.arch }}
-          path: ./wheelhouse/*.whl
-          retention-days: 30
+          name: triton-wheels
+          path: dist/*.whl
